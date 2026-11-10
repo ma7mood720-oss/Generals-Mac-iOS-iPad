@@ -1,0 +1,76 @@
+name: Build Zero Hour for iPhone
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Prepare build tools
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          brew install cmake ninja meson pkgconf glslang xcodegen autoconf autoconf-archive automake libtool nasm
+          git submodule update --init --depth 1 references/fbraz3-dxvk
+          git -C references/fbraz3-dxvk submodule update --init --depth 1 include/native/directx include/vulkan include/spirv
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$RUNNER_TEMP/vcpkg"
+          # This registry revision includes the FFmpeg overrides in vcpkg.json.
+          git -C "$RUNNER_TEMP/vcpkg" checkout 8469b01206bff843500592f18dcab88b13331da6
+          "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$RUNNER_TEMP/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Prepare graphics dependencies
+        run: |
+          export GX_MOLTENVK_ROOT="$RUNNER_TEMP/moltenvk"
+          bash scripts/build/ios/fetch-moltenvk.sh
+          moltenvk="$GX_MOLTENVK_ROOT/MoltenVK/MoltenVK"
+          static_lib="$moltenvk/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
+          framework="$moltenvk/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework"
+          test -f "$static_lib"
+          test -f "$framework/MoltenVK"
+          sdk="$RUNNER_TEMP/vulkan-ios"
+          mkdir -p "$sdk/lib/MoltenVK.xcframework/ios-arm64"
+          ln -s "$static_lib" "$sdk/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
+          ln -s "$moltenvk/include" "$sdk/include"
+          test -f "$sdk/include/vulkan/vulkan.h"
+          echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "GX_MOLTENVK=$framework" >> "$GITHUB_ENV"
+
+      - name: Build iPhone engine
+        run: |
+          cmake --preset ios-vulkan
+          cmake --build build/ios-vulkan --target z_generals --parallel 3
+
+      - name: Package unsigned IPA and data templates
+        env:
+          GX_BUNDLE_ID: org.generalsx.zerohour
+          GX_FONTS: ${{ runner.temp }}/ios-fonts
+        run: |
+          bash scripts/build/ios/package-ios-zh.sh --dev --unsigned
+          bash scripts/build/ios/stage-fonts.sh
+          mkdir -p ios-download/GameData/fonts
+          cp build/ios-package/GeneralsXZH-unsigned.ipa ios-download/
+          cp "$GX_FONTS"/*.ttf ios-download/GameData/fonts/
+          cp ios/config/Options.ini ios-download/GameData/DefaultOptions.ini
+          cp ios/config/dxvk.conf ios-download/GameData/
+          unzip -tq ios-download/GeneralsXZH-unsigned.ipa
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zero-hour-ios
+          path: ios-download/
+          if-no-files-found: error

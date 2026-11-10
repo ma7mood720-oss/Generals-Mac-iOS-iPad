@@ -11,20 +11,27 @@
 #      provisioning profile from step 1, preserving entitlements.
 #   5. Optional: install to the first connected device via devicectl.
 #
-# Usage: ./scripts/build/ios/package-ios-zh.sh [--dev] [--install]
+# Usage: ./scripts/build/ios/package-ios-zh.sh [--dev] [--unsigned | --install]
 #   --dev      skip bundling the 2.7 GB of game assets (code-only iteration)
+#   --unsigned export an IPA for signing on another computer
 #   --install  install the packaged app to the first connected device
 set -euo pipefail
 
 DEV_MODE=0
 DO_INSTALL=0
+UNSIGNED=0
 for arg in "$@"; do
     case "$arg" in
         --dev)     DEV_MODE=1 ;;
+        --unsigned) UNSIGNED=1 ;;
         --install) DO_INSTALL=1 ;;
-        *) echo "ERROR: unknown argument '$arg' (usage: $0 [--dev] [--install])"; exit 1 ;;
+        *) echo "ERROR: unknown argument '$arg' (usage: $0 [--dev] [--unsigned | --install])"; exit 1 ;;
     esac
 done
+if [[ "$UNSIGNED" == 1 && "$DO_INSTALL" == 1 ]]; then
+    echo "ERROR: an unsigned IPA must be signed before installation."
+    exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
@@ -51,14 +58,18 @@ fi
 echo "==> Generating Xcode project (xcodegen)"
 (cd "${IOS_DIR}" && xcodegen generate --quiet)
 
-echo "==> Building provisioning shell app"
+SIGNING_SETTINGS=(DEVELOPMENT_TEAM="${TEAM_ID}" -allowProvisioningUpdates)
+if [[ "$UNSIGNED" == 1 ]]; then
+    SIGNING_SETTINGS=(DEVELOPMENT_TEAM= CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO)
+fi
+
+echo "==> Building shell app"
 xcodebuild -project "${IOS_DIR}/${APP_NAME}.xcodeproj" \
     -scheme "${APP_NAME}" -configuration Release \
     -destination 'generic/platform=iOS' \
     -derivedDataPath "${DERIVED}" \
-    DEVELOPMENT_TEAM="${TEAM_ID}" \
     PRODUCT_BUNDLE_IDENTIFIER="${BUNDLE_ID}" \
-    -allowProvisioningUpdates build | tail -3
+    "${SIGNING_SETTINGS[@]}" build
 
 SHELL_APP="${DERIVED}/Build/Products/Release-iphoneos/${APP_NAME}.app"
 if [[ ! -d "${SHELL_APP}" ]]; then
@@ -170,6 +181,14 @@ fi
 
 # Point the executable's rpath at the embedded frameworks
 install_name_tool -add_rpath "@executable_path/Frameworks" "${APP}/${APP_NAME}" 2>/dev/null || true
+
+if [[ "$UNSIGNED" == 1 ]]; then
+    mkdir "${OUT_DIR}/Payload"
+    mv "${APP}" "${OUT_DIR}/Payload/"
+    ditto -c -k --keepParent "${OUT_DIR}/Payload" "${OUT_DIR}/GeneralsXZH-unsigned.ipa"
+    echo "==> Unsigned IPA ready: ${OUT_DIR}/GeneralsXZH-unsigned.ipa"
+    exit 0
+fi
 
 echo "==> Re-signing"
 ENTITLEMENTS="${OUT_DIR}/entitlements.plist"
